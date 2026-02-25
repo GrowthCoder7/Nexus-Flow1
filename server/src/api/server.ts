@@ -362,6 +362,53 @@ app.post('/test-node', async (req, res) => {
     }
 });
 
+// --- API ROUTE: RESUME PAUSED WORKFLOW ---
+app.post('/resume-workflow', async (req, res) => {
+    const { workflowId, jobId } = req.body;
+
+    if (!workflowId || !jobId) {
+        return res.status(400).json({ success: false, error: "Missing workflowId or jobId" });
+    }
+
+    try {
+        const pauseKey = `workflow_pause:${workflowId}:${jobId}`;
+        const raw = await redisConnection.get(pauseKey);
+
+        if (!raw) {
+            return res.status(404).json({ success: false, error: "No paused workflow state found." });
+        }
+
+        const pauseState = JSON.parse(raw);
+        if (!pauseState.remainingActions || !pauseState.context) {
+            return res.status(500).json({ success: false, error: "Paused state is corrupted." });
+        }
+
+        // Prevent multiple resumes from the same paused state
+        await redisConnection.del(pauseKey);
+
+        const executionId = `resume_${Date.now()}`;
+
+        await workflowQueue.add(
+            'execute-workflow',
+            {
+                context: pauseState.context,
+                requestedAt: new Date().toISOString(),
+                workflowId: workflowId,
+                executionId,
+                resume: true,
+                remainingActions: pauseState.remainingActions,
+                spreadsheetIdOverride: pauseState.spreadsheetId || null,
+            },
+            { jobId: executionId }
+        );
+
+        return res.status(202).json({ success: true, jobId: executionId });
+    } catch (error: any) {
+        console.error("❌ Resume Workflow Error:", error);
+        return res.status(500).json({ success: false, error: "Failed to resume workflow." });
+    }
+});
+
 // --- GET ACTIVE SCHEDULES ---
 app.get('/schedules', async (req, res) => {
     try {
